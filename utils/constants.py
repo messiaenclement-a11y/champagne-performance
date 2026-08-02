@@ -1,0 +1,9 @@
+APP_NAME="Champagne Performance"
+CLUB_NAME="Champagne Basket Formation"
+PLAYER_POSITIONS=["1","2","3","4","5"]
+PLAYER_CATEGORIES=["U18","U21","Autre"]
+PLAYER_STATUSES=["Conventionné CFCP","Partenaire d'entraînement","Non conventionné","Autre"]
+ATTENDANCE_TYPES=["Entraînement collectif","Musculation","Match","Vidéo","Institutionnel","Autre"]
+ATTENDANCE_STATUSES=["Présent","Avec les professionnels","Absent","Blessé","Malade","Formation / Études","Autre"]
+SHOOTING_ZONES=["OG","45G","70G","AXE","70D","45D","OD"]
+JUMP_TYPES=["CMJ","Bosco"]
