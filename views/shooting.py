@@ -50,6 +50,7 @@ STATE_DEFAULTS = {
     "shooting_elapsed_seconds": 0,
 
     "shooting_sync_ack": 0,
+    "shooting_confirmed_ids": [],
     "shooting_open_report": False,
 }
 
@@ -310,150 +311,42 @@ def timer_fragment() -> None:
 # SYNCHRONISATION SUPABASE
 # ============================================================
 
-def sync_entries(entries: list[dict]) -> int:
-    """
-    Enregistre les tirs stockés localement dans le navigateur.
-    Les entrées sont d'abord regroupées afin de limiter le nombre
-    d'opérations Supabase.
-    """
+def sync_entries(entries: list[dict]) -> list[str]:
+    """Enregistrement atomique et idempotent via la fonction SQL Supabase.
 
+    La fonction SQL est indispensable : une simple vérification Python suivie
+    d'un ajout ne protège pas contre les doublons ou les coupures réseau.
+    """
     if not entries:
-        return 0
+        return []
 
-    db = get_supabase()
+    ids = [str(e["id"]) for e in entries]
+    if len(ids) != len(set(ids)):
+        raise ValueError("Identifiants de saisie répétés dans le lot")
 
-    # Regroupement :
-    # date + joueur + zone + contexte
-    grouped = {}
+    response = get_supabase().rpc(
+        "sync_shooting_entries",
+        {
+            "p_entries": [
+                {
+                    "id": str(e["id"]),
+                    "date": str(e["date"]),
+                    "player_id": str(e["player_id"]),
+                    "zone": str(e["zone"]),
+                    "context": str(e["context"]),
+                    "made": int(e["made"]),
+                    "attempted": int(e["attempted"]),
+                }
+                for e in entries
+            ],
+            "p_duration_seconds": current_elapsed_seconds(),
+        },
+    ).execute()
 
-    for entry in entries:
-        key = (
-            entry["date"],
-            entry["player_id"],
-            entry["zone"],
-            entry["context"],
-        )
-
-        if key not in grouped:
-            grouped[key] = {
-                "made": 0,
-                "attempted": 0,
-            }
-
-        grouped[key]["made"] += int(entry["made"])
-        grouped[key]["attempted"] += int(entry["attempted"])
-
-    session_cache = {}
-    duration = current_elapsed_seconds()
-
-    for (
-        session_date,
-        player_id,
-        zone,
-        context,
-    ), values in grouped.items():
-
-        session_key = (session_date, player_id)
-
-        # ----------------------------------------------------
-        # SESSION JOUEUR / DATE
-        # ----------------------------------------------------
-
-        if session_key not in session_cache:
-
-            sessions = (
-                db.table("shooting_sessions")
-                .select("*")
-                .eq("player_id", player_id)
-                .eq("session_date", session_date)
-                .limit(1)
-                .execute()
-                .data
-                or []
-            )
-
-            if sessions:
-                session = sessions[0]
-
-                (
-                    db.table("shooting_sessions")
-                    .update({"duration_seconds": duration})
-                    .eq("id", session["id"])
-                    .execute()
-                )
-
-            else:
-                response = (
-                    db.table("shooting_sessions")
-                    .insert(
-                        {
-                            "player_id": player_id,
-                            "session_date": session_date,
-                            "duration_seconds": duration,
-                            "comment": None,
-                        }
-                    )
-                    .execute()
-                )
-
-                session = response.data[0]
-
-            session_cache[session_key] = session
-
-        session = session_cache[session_key]
-
-        # ----------------------------------------------------
-        # RÉSULTAT SPOT / CONTEXTE
-        # ----------------------------------------------------
-
-        existing = (
-            db.table("shooting_results")
-            .select("*")
-            .eq("shooting_session_id", session["id"])
-            .eq("zone", zone)
-            .eq("context", context)
-            .limit(1)
-            .execute()
-            .data
-            or []
-        )
-
-        if existing:
-            result = existing[0]
-
-            (
-                db.table("shooting_results")
-                .update(
-                    {
-                        "made":
-                            int(result.get("made") or 0)
-                            + values["made"],
-
-                        "attempted":
-                            int(result.get("attempted") or 0)
-                            + values["attempted"],
-                    }
-                )
-                .eq("id", result["id"])
-                .execute()
-            )
-
-        else:
-            (
-                db.table("shooting_results")
-                .insert(
-                    {
-                        "shooting_session_id": session["id"],
-                        "zone": zone,
-                        "context": context,
-                        "made": values["made"],
-                        "attempted": values["attempted"],
-                    }
-                )
-                .execute()
-            )
-
-    return len(entries)
+    confirmed = response.data
+    if not isinstance(confirmed, list) or set(confirmed) != set(ids):
+        raise RuntimeError("Confirmation Supabase incomplète ou inattendue")
+    return confirmed
 
 
 # ============================================================
@@ -1023,63 +916,38 @@ def component_payload(trigger_name: str):
         return None
 
 
+def confirm_sync(entries: list[dict]) -> None:
+    confirmed = sync_entries(entries)
+    st.session_state.shooting_confirmed_ids = confirmed
+    st.session_state.shooting_sync_ack += 1
+
+
 def handle_sync():
     payload = component_payload("sync")
-
     if not payload:
         return
-
     entries = payload.get("entries") or []
-
     if not entries:
-        st.toast(
-            "Aucun tir à synchroniser.",
-            icon="✅",
-        )
+        st.toast("Aucun tir à synchroniser.", icon="✅")
         return
-
     try:
-        count = sync_entries(entries)
-
-        st.session_state.shooting_sync_ack += 1
-
-        st.toast(
-            f"{count} saisie(s) synchronisée(s).",
-            icon="✅",
-        )
-
+        confirm_sync(entries)
+        st.toast(f"{len(entries)} saisie(s) confirmée(s).", icon="✅")
     except Exception as exc:
-        st.error(
-            "Synchronisation impossible. "
-            "Les tirs restent conservés sur la tablette."
-        )
+        st.error("Synchronisation impossible : les tirs restent sur la tablette.")
         st.exception(exc)
 
 
 def handle_report():
     payload = component_payload("report")
-
-    entries = (
-        payload.get("entries") or []
-        if payload
-        else []
-    )
-
+    entries = payload.get("entries") or [] if payload else []
     try:
-
         if entries:
-            sync_entries(entries)
-            st.session_state.shooting_sync_ack += 1
-
+            confirm_sync(entries)
         stop_timer()
-
         st.session_state.shooting_open_report = True
-
     except Exception as exc:
-        st.error(
-            "Impossible de synchroniser avant le bilan. "
-            "Les tirs restent conservés localement."
-        )
+        st.error("Synchronisation impossible avant le bilan. Les tirs restent en attente.")
         st.exception(exc)
 
 
@@ -1480,33 +1348,21 @@ export default function(component) {
     const reportBtn = parentElement.querySelector("#report-btn");
 
     const QUEUE_KEY = "champagne_shooting_queue_v2";
-    const ACK_KEY = "champagne_shooting_ack_v2";
-
     let queue = [];
-
     try {
-        queue = JSON.parse(
-            window.localStorage.getItem(QUEUE_KEY) || "[]"
-        );
-    } catch {
-        queue = [];
+        const parsed = JSON.parse(window.localStorage.getItem(QUEUE_KEY) || "[]");
+        queue = Array.isArray(parsed) ? parsed : [];
+    } catch { queue = []; }
+
+    // Retirer uniquement les IDs explicitement confirmés par Supabase.
+    // Ne jamais effacer les nouvelles saisies ajoutées pendant un envoi.
+    const confirmed = new Set(data.confirmed_ids || []);
+    if (confirmed.size) {
+        queue = queue.filter(entry => !confirmed.has(String(entry.id)));
+        window.localStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
     }
 
-    const lastAck = Number(
-        window.localStorage.getItem(ACK_KEY) || 0
-    );
-
-    if ((data.ack || 0) > lastAck) {
-        queue = [];
-        window.localStorage.setItem(
-            QUEUE_KEY,
-            JSON.stringify(queue)
-        );
-        window.localStorage.setItem(
-            ACK_KEY,
-            String(data.ack)
-        );
-    }
+    let syncing = false;
 
     let step = 1;
     let player = null;
@@ -1967,32 +1823,26 @@ export default function(component) {
         else if (step === 4) renderAttempted();
     };
 
-    syncBtn.onclick = () => {
-
-        if (!queue.length) {
+    const sendBatch = (trigger) => {
+        if (syncing) return;
+        if (!queue.length && trigger === "sync") {
             showFlash("✓ Rien à synchroniser");
             return;
         }
-
-        setTriggerValue(
-            "sync",
-            {
-                entries: [...queue],
-                sent_at: Date.now()
-            }
-        );
+        syncing = true;
+        syncBtn.disabled = true;
+        reportBtn.disabled = true;
+        pendingBox.textContent = "Synchronisation en cours…";
+        setTriggerValue(trigger, {
+            entries: [...queue],
+            sent_at: Date.now()
+        });
+        // Si la réponse n'arrive pas, le rechargement de la page permet
+        // de réessayer sans risque : les IDs sont protégés en base.
     };
 
-    reportBtn.onclick = () => {
-
-        setTriggerValue(
-            "report",
-            {
-                entries: [...queue],
-                sent_at: Date.now()
-            }
-        );
-    };
+    syncBtn.onclick = () => sendBatch("sync");
+    reportBtn.onclick = () => sendBatch("report");
 
     render();
 }
@@ -2065,9 +1915,8 @@ shooting_component(
                 .shooting_lock_attempted_value
             ),
 
-        "ack":
-            st.session_state
-            .shooting_sync_ack,
+        "ack": st.session_state.shooting_sync_ack,
+        "confirmed_ids": st.session_state.shooting_confirmed_ids,
     },
 
     key="shooting_turbo_component",
