@@ -1,29 +1,29 @@
 from __future__ import annotations
-
 import time
 from datetime import date
 from math import pi
-
 import matplotlib.pyplot as plt
 import streamlit as st
-
 from services.supabase_client import get_supabase
 from utils.formatting import player_label
-
-
 # ============================================================
 # CONFIGURATION
 # ============================================================
-
 CLUB_DARK = "#1A2434"
 CLUB_BLUE = "#04B3EA"
 CLUB_GOLD = "#B8A05A"
-
 SHOOTING_CONTEXTS = {
     "statique_sans_opposition": "Statique - sans opposition",
     "statique_avec_opposition": "Statique - avec opposition",
     "mouvement_sans_opposition": "En mouvement - sans opposition",
     "mouvement_avec_opposition": "En mouvement - avec opposition",
+}
+SESSION_TYPES = {
+    "standard": "Standard",
+    "lunettes": "Lunettes / vision réduite",
+    "fatigue": "Fatigue",
+    "opposition": "Opposition spécifique",
+    "autre": "Autre séance spécifique",
 }
 
 ZONES = [
@@ -35,47 +35,36 @@ ZONES = [
     ("45D", "45°D"),
     ("0D", "0°D"),
 ]
-
 STATE_DEFAULTS = {
     "shooting_context": "statique_sans_opposition",
     "shooting_session_date": date.today(),
-
     "shooting_lock_made": False,
     "shooting_lock_attempted": False,
     "shooting_lock_made_value": 0,
     "shooting_lock_attempted_value": 10,
-
     "shooting_timer_running": False,
     "shooting_timer_started_at": None,
     "shooting_elapsed_seconds": 0,
-
     "shooting_sync_ack": 0,
     "shooting_confirmed_ids": [],
     "shooting_open_report": False,
 }
-
 for key, value in STATE_DEFAULTS.items():
     st.session_state.setdefault(key, value)
-
-
 # ============================================================
 # STYLE STREAMLIT
 # ============================================================
-
 st.markdown(
     """
     <style>
-
     .block-container {
         padding-top: 1rem;
         padding-bottom: 2rem;
         max-width: 1800px;
     }
-
     div[data-testid="stExpander"] details {
         border: 0;
     }
-
     div[data-testid="stExpander"] summary {
         background: #1A2434;
         color: white;
@@ -83,13 +72,11 @@ st.markdown(
         padding: 12px 18px;
         font-weight: 800;
     }
-
     div[data-testid="stExpander"] summary p {
         color: white;
         font-size: 1.25rem;
         font-weight: 800;
     }
-
     .report-card {
         background: white;
         border: 1px solid #e4e8ee;
@@ -98,7 +85,6 @@ st.markdown(
         min-height: 110px;
         box-shadow: 0 3px 12px rgba(26, 36, 52, .05);
     }
-
     .report-card-label {
         color: #6b7280;
         font-size: .8rem;
@@ -106,7 +92,6 @@ st.markdown(
         text-transform: uppercase;
         letter-spacing: .04em;
     }
-
     .report-card-value {
         color: #1A2434;
         font-size: 2rem;
@@ -114,13 +99,11 @@ st.markdown(
         font-weight: 850;
         margin-top: 8px;
     }
-
     .report-card-sub {
         color: #8a94a3;
         font-size: .78rem;
         margin-top: 6px;
     }
-
     .report-section-title {
         background: #1A2434;
         color: white;
@@ -130,7 +113,6 @@ st.markdown(
         font-weight: 800;
         margin: 12px 0;
     }
-
     .ranking-header,
     .ranking-row {
         display: grid;
@@ -138,14 +120,12 @@ st.markdown(
         align-items: center;
         gap: 8px;
     }
-
     .ranking-header {
         color: #8a94a3;
         font-size: .73rem;
         font-weight: 700;
         padding: 5px 10px;
     }
-
     .ranking-row {
         background: white;
         border: 1px solid #e8ebef;
@@ -153,43 +133,34 @@ st.markdown(
         padding: 10px;
         margin-bottom: 7px;
     }
-
     .ranking-row.top {
         border-left: 5px solid #B8A05A;
         background: #fcfaf4;
     }
-
     .ranking-rank {
         font-weight: 850;
         color: #1A2434;
     }
-
     .ranking-name {
         font-weight: 750;
         color: #1A2434;
     }
-
     .ranking-pct {
         font-weight: 850;
         color: #1A2434;
         text-align: right;
     }
-
     .ranking-volume {
         color: #7c8796;
         text-align: right;
     }
-
     </style>
     """,
     unsafe_allow_html=True,
 )
-
-
 # ============================================================
 # JOUEURS
 # ============================================================
-
 @st.cache_data(ttl=300, show_spinner=False)
 def get_players() -> list[dict]:
     response = (
@@ -201,20 +172,52 @@ def get_players() -> list[dict]:
         .execute()
     )
     return response.data or []
-
-
 def player_button_label(player: dict) -> str:
     first_name = str(player.get("first_name") or "").strip()
     return first_name.upper() if first_name else player_label(player).upper()
+# ============================================================
+# PARAMÈTRES ET CATÉGORIES DE SÉANCE
+# ============================================================
 
+def get_date_settings(session_date: date) -> dict:
+    rows = (
+        get_supabase().table("shooting_sessions")
+        .select("session_type,include_in_standard_stats,comment")
+        .eq("session_date", session_date.isoformat())
+        .limit(1).execute().data or []
+    )
+    if not rows:
+        return {"session_type": "standard", "include_in_standard_stats": True, "comment": ""}
+    row = rows[0]
+    return {
+        "session_type": row.get("session_type") or "standard",
+        "include_in_standard_stats": row.get("include_in_standard_stats") is not False,
+        "comment": row.get("comment") or "",
+    }
+
+
+def update_date_settings(session_date: date, kind: str, include: bool, comment: str) -> None:
+    # One row per player and date; all rows for the date receive the same metadata.
+    get_supabase().table("shooting_sessions").update({
+        "session_type": kind,
+        "include_in_standard_stats": include,
+        "comment": comment,
+    }).eq("session_date", session_date.isoformat()).execute()
+
+
+def apply_current_date_settings() -> None:
+    update_date_settings(
+        st.session_state.shooting_session_date,
+        st.session_state.shooting_session_type,
+        st.session_state.shooting_include_standard,
+        st.session_state.shooting_session_comment,
+    )
 
 # ============================================================
 # CHRONOMÈTRE
 # ============================================================
-
 def current_elapsed_seconds() -> int:
     elapsed = int(st.session_state.shooting_elapsed_seconds or 0)
-
     if (
         st.session_state.shooting_timer_running
         and st.session_state.shooting_timer_started_at
@@ -223,43 +226,29 @@ def current_elapsed_seconds() -> int:
             time.time()
             - float(st.session_state.shooting_timer_started_at)
         )
-
     return max(0, elapsed)
-
-
 def format_timer(total_seconds: int) -> str:
     minutes, seconds = divmod(max(0, int(total_seconds)), 60)
     return f"{minutes:02d}:{seconds:02d}"
-
-
 def start_timer() -> None:
     if not st.session_state.shooting_timer_running:
         st.session_state.shooting_timer_started_at = time.time()
         st.session_state.shooting_timer_running = True
-
-
 def stop_timer() -> None:
     if st.session_state.shooting_timer_running:
         st.session_state.shooting_elapsed_seconds = current_elapsed_seconds()
         st.session_state.shooting_timer_started_at = None
         st.session_state.shooting_timer_running = False
-
-
 def adjust_timer(seconds: int) -> None:
     was_running = st.session_state.shooting_timer_running
-
     st.session_state.shooting_elapsed_seconds = max(
         0,
         current_elapsed_seconds() + seconds,
     )
-
     if was_running:
         st.session_state.shooting_timer_started_at = time.time()
-
-
 @st.fragment(run_every="1s")
 def timer_fragment() -> None:
-
     st.markdown(
         f"""
         <div style="
@@ -277,20 +266,16 @@ def timer_fragment() -> None:
         """,
         unsafe_allow_html=True,
     )
-
     c1, c2, c3 = st.columns([1, 2, 1])
-
     with c1:
         if st.button("−", key="timer_minus", use_container_width=True):
             adjust_timer(-1)
-
     with c2:
         label = (
             "■ Arrêter"
             if st.session_state.shooting_timer_running
             else "▶ Démarrer"
         )
-
         if st.button(
             label,
             key="timer_toggle",
@@ -301,29 +286,22 @@ def timer_fragment() -> None:
                 stop_timer()
             else:
                 start_timer()
-
     with c3:
         if st.button("+", key="timer_plus", use_container_width=True):
             adjust_timer(1)
-
-
 # ============================================================
 # SYNCHRONISATION SUPABASE
 # ============================================================
-
 def sync_entries(entries: list[dict]) -> list[str]:
     """Enregistrement atomique et idempotent via la fonction SQL Supabase.
-
     La fonction SQL est indispensable : une simple vérification Python suivie
     d'un ajout ne protège pas contre les doublons ou les coupures réseau.
     """
     if not entries:
         return []
-
     ids = [str(e["id"]) for e in entries]
     if len(ids) != len(set(ids)):
         raise ValueError("Identifiants de saisie répétés dans le lot")
-
     response = get_supabase().rpc(
         "sync_shooting_entries",
         {
@@ -342,21 +320,19 @@ def sync_entries(entries: list[dict]) -> list[str]:
             "p_duration_seconds": current_elapsed_seconds(),
         },
     ).execute()
-
     confirmed = response.data
     if not isinstance(confirmed, list) or set(confirmed) != set(ids):
         raise RuntimeError("Confirmation Supabase incomplète ou inattendue")
+    # If the queue contains older dates, never apply the selected date's
+    # settings to those older sessions.
+    if any(str(e.get("date")) == st.session_state.shooting_session_date.isoformat() for e in entries):
+        apply_current_date_settings()
     return confirmed
-
-
 # ============================================================
 # DONNÉES BILAN
 # ============================================================
-
-def get_collective_session_data(session_date: date) -> dict:
-
+def get_collective_session_data(session_date: date, include_special: bool = True) -> dict:
     db = get_supabase()
-
     sessions = (
         db.table("shooting_sessions")
         .select("*")
@@ -365,6 +341,8 @@ def get_collective_session_data(session_date: date) -> dict:
         .data
         or []
     )
+    if not include_special:
+        sessions = [s for s in sessions if s.get("include_in_standard_stats") is not False]
 
     if not sessions:
         return {
@@ -372,9 +350,7 @@ def get_collective_session_data(session_date: date) -> dict:
             "results": [],
             "players": {},
         }
-
     session_ids = [s["id"] for s in sessions]
-
     results = (
         db.table("shooting_results")
         .select("*")
@@ -383,7 +359,6 @@ def get_collective_session_data(session_date: date) -> dict:
         .data
         or []
     )
-
     player_ids = list(
         {
             s["player_id"]
@@ -391,7 +366,6 @@ def get_collective_session_data(session_date: date) -> dict:
             if s.get("player_id")
         }
     )
-
     player_rows = (
         db.table("players")
         .select("*")
@@ -402,7 +376,6 @@ def get_collective_session_data(session_date: date) -> dict:
         if player_ids
         else []
     )
-
     return {
         "sessions": sessions,
         "results": results,
@@ -411,57 +384,40 @@ def get_collective_session_data(session_date: date) -> dict:
             for player in player_rows
         },
     }
-
-
-def get_previous_shooting_date(current_date: date):
-
-    rows = (
-        get_supabase()
-        .table("shooting_sessions")
+def get_previous_shooting_date(current_date: date, include_special: bool = True):
+    query = (
+        get_supabase().table("shooting_sessions")
         .select("session_date")
         .lt("session_date", current_date.isoformat())
-        .order("session_date", desc=True)
-        .limit(1)
-        .execute()
-        .data
-        or []
     )
+    if not include_special:
+        query = query.eq("include_in_standard_stats", True)
+    rows = query.order("session_date", desc=True).limit(1).execute().data or []
+    return date.fromisoformat(rows[0]["session_date"]) if rows else None
 
-    if not rows:
-        return None
 
-    return date.fromisoformat(rows[0]["session_date"])
-
-
-def calculate_session_summary(session_date: date) -> dict:
-
-    data = get_collective_session_data(session_date)
-
+def calculate_session_summary(session_date: date, include_special: bool = True) -> dict:
+    data = get_collective_session_data(session_date, include_special=include_special)
     sessions = data["sessions"]
     results = data["results"]
     players = data["players"]
-
     session_to_player = {
         session["id"]: session["player_id"]
         for session in sessions
     }
-
     total_attempted = sum(
         int(result.get("attempted") or 0)
         for result in results
     )
-
     total_made = sum(
         int(result.get("made") or 0)
         for result in results
     )
-
     percentage = (
         total_made / total_attempted * 100
         if total_attempted
         else 0
     )
-
     duration = max(
         [
             int(session.get("duration_seconds") or 0)
@@ -469,64 +425,48 @@ def calculate_session_summary(session_date: date) -> dict:
         ],
         default=0,
     )
-
     shots_per_5 = (
         total_attempted / duration * 300
         if duration
         else 0
     )
-
     # --------------------------------------------------------
     # JOUEURS
     # --------------------------------------------------------
-
     player_stats = {}
-
     for result in results:
-
         player_id = session_to_player.get(
             result["shooting_session_id"]
         )
-
         if not player_id:
             continue
-
         player = players.get(player_id, {})
-
         if player_id not in player_stats:
             player_stats[player_id] = {
                 "name": player_button_label(player),
                 "made": 0,
                 "attempted": 0,
             }
-
         player_stats[player_id]["made"] += int(
             result.get("made") or 0
         )
-
         player_stats[player_id]["attempted"] += int(
             result.get("attempted") or 0
         )
-
     ranking = []
-
     for stat in player_stats.values():
-
         attempted = stat["attempted"]
-
         pct = (
             stat["made"] / attempted * 100
             if attempted
             else 0
         )
-
         ranking.append(
             {
                 **stat,
                 "percentage": pct,
             }
         )
-
     # Classement par %.
     # Le volume départage uniquement une égalité parfaite.
     ranking.sort(
@@ -536,11 +476,9 @@ def calculate_session_summary(session_date: date) -> dict:
         ),
         reverse=True,
     )
-
     # --------------------------------------------------------
     # SPOTS
     # --------------------------------------------------------
-
     zones = {
         code: {
             "made": 0,
@@ -548,34 +486,24 @@ def calculate_session_summary(session_date: date) -> dict:
         }
         for code, _ in ZONES
     }
-
     for result in results:
-
         zone = result.get("zone")
-
         if zone not in zones:
             continue
-
         zones[zone]["made"] += int(
             result.get("made") or 0
         )
-
         zones[zone]["attempted"] += int(
             result.get("attempted") or 0
         )
-
     zone_percentages = {}
-
     for code, _ in ZONES:
-
         attempted = zones[code]["attempted"]
-
         zone_percentages[code] = (
             zones[code]["made"] / attempted * 100
             if attempted
             else 0
         )
-
     return {
         "total_attempted": total_attempted,
         "total_made": total_made,
@@ -589,24 +517,18 @@ def calculate_session_summary(session_date: date) -> dict:
             else "—",
         "zones": zone_percentages,
     }
-
-
 # ============================================================
 # RADAR
 # ============================================================
-
 def create_session_radar(
     current_summary: dict,
     previous_summary: dict | None,
 ):
-
     labels = [label for _, label in ZONES]
-
     current = [
         current_summary["zones"][code]
         for code, _ in ZONES
     ]
-
     previous = (
         [
             previous_summary["zones"][code]
@@ -615,31 +537,23 @@ def create_session_radar(
         if previous_summary
         else None
     )
-
     count = len(labels)
-
     angles = [
         n / count * 2 * pi
         for n in range(count)
     ]
-
     angles += angles[:1]
     current += current[:1]
-
     if previous:
         previous += previous[:1]
-
     fig, ax = plt.subplots(
         figsize=(6.3, 5.6),
         subplot_kw={"polar": True},
     )
-
     fig.patch.set_facecolor("white")
     ax.set_facecolor("#fbfcfd")
-
     ax.set_theta_offset(pi / 2)
     ax.set_theta_direction(-1)
-
     ax.set_xticks(angles[:-1])
     ax.set_xticklabels(
         labels,
@@ -647,7 +561,6 @@ def create_session_radar(
         color=CLUB_DARK,
         fontweight="bold",
     )
-
     ax.set_ylim(0, 100)
     ax.set_yticks([20, 40, 60, 80, 100])
     ax.set_yticklabels(
@@ -655,10 +568,8 @@ def create_session_radar(
         fontsize=8,
         color="#7c8796",
     )
-
     ax.spines["polar"].set_color("#d9dee5")
     ax.grid(color="#dfe4ea", linewidth=.8)
-
     ax.plot(
         angles,
         current,
@@ -666,16 +577,13 @@ def create_session_radar(
         linewidth=2.8,
         label="Séance actuelle",
     )
-
     ax.fill(
         angles,
         current,
         color=CLUB_GOLD,
         alpha=.18,
     )
-
     if previous:
-
         ax.plot(
             angles,
             previous,
@@ -683,14 +591,12 @@ def create_session_radar(
             linewidth=2.3,
             label="Séance précédente",
         )
-
         ax.fill(
             angles,
             previous,
             color=CLUB_BLUE,
             alpha=.07,
         )
-
     ax.legend(
         loc="lower center",
         bbox_to_anchor=(.5, -.18),
@@ -698,46 +604,40 @@ def create_session_radar(
         frameon=False,
         fontsize=9,
     )
-
     fig.tight_layout()
-
     return fig
-
-
 # ============================================================
 # BILAN
 # ============================================================
-
 @st.dialog(
     "Bilan de fin de séance",
     width="large",
 )
 def show_session_report():
-
     session_date = (
         st.session_state.shooting_session_date
     )
-
-    summary = calculate_session_summary(
-        session_date
+    show_all = st.checkbox(
+        "Afficher aussi les séances spécifiques (hors bilan standard)",
+        value=False,
+        key="shooting_report_include_special",
     )
-
+    summary = calculate_session_summary(
+        session_date, include_special=show_all
+    )
     if not summary["total_attempted"]:
         st.warning(
             "Aucun tir enregistré pour cette séance."
         )
         return
-
     previous_date = get_previous_shooting_date(
-        session_date
+        session_date, include_special=show_all
     )
-
     previous_summary = (
-        calculate_session_summary(previous_date)
+        calculate_session_summary(previous_date, include_special=show_all)
         if previous_date
         else None
     )
-
     st.markdown(
         f"""
         <div style="
@@ -751,13 +651,10 @@ def show_session_report():
         """,
         unsafe_allow_html=True,
     )
-
     # --------------------------------------------------------
     # CARTES
     # --------------------------------------------------------
-
     cards = st.columns(4)
-
     values = [
         (
             "Tirs tentés",
@@ -780,7 +677,6 @@ def show_session_report():
             "Meilleur % de réussite",
         ),
     ]
-
     for col, (label, value, sub) in zip(
         cards,
         values,
@@ -796,39 +692,30 @@ def show_session_report():
                 """,
                 unsafe_allow_html=True,
             )
-
     # --------------------------------------------------------
     # RADAR + CLASSEMENT
     # --------------------------------------------------------
-
     st.markdown(
         '<div class="report-section-title">'
         'PERFORMANCE COLLECTIVE & CLASSEMENT'
         '</div>',
         unsafe_allow_html=True,
     )
-
     radar_col, ranking_col = st.columns(
         [1.15, 1],
         gap="large",
     )
-
     with radar_col:
-
         fig = create_session_radar(
             summary,
             previous_summary,
         )
-
         st.pyplot(
             fig,
             use_container_width=True,
         )
-
         plt.close(fig)
-
     with ranking_col:
-
         st.markdown(
             f"""
             <div style="
@@ -839,7 +726,6 @@ def show_session_report():
             ">
                 Classement de la séance
             </div>
-
             <div style="
                 color:#7c8796;
                 font-size:.82rem;
@@ -850,7 +736,6 @@ def show_session_report():
             """,
             unsafe_allow_html=True,
         )
-
         st.markdown(
             """
             <div class="ranking-header">
@@ -862,20 +747,16 @@ def show_session_report():
             """,
             unsafe_allow_html=True,
         )
-
         ranking_html = ""
-
         for index, player in enumerate(
             summary["ranking"],
             start=1,
         ):
-
             row_class = (
                 "ranking-row top"
                 if index == 1
                 else "ranking-row"
             )
-
             ranking_html += f"""
                 <div class="{row_class}">
                     <div class="ranking-rank">{index}</div>
@@ -888,25 +769,19 @@ def show_session_report():
                     </div>
                 </div>
             """
-
         st.markdown(
             ranking_html,
             unsafe_allow_html=True,
         )
-
-
 # ============================================================
 # CALLBACKS DU MODE TURBO
 # ============================================================
-
 def component_payload(trigger_name: str):
     component_state = st.session_state.get(
         "shooting_turbo_component"
     )
-
     if component_state is None:
         return None
-
     try:
         return getattr(
             component_state,
@@ -914,14 +789,10 @@ def component_payload(trigger_name: str):
         )
     except Exception:
         return None
-
-
 def confirm_sync(entries: list[dict]) -> None:
     confirmed = sync_entries(entries)
     st.session_state.shooting_confirmed_ids = confirmed
     st.session_state.shooting_sync_ack += 1
-
-
 def handle_sync():
     payload = component_payload("sync")
     if not payload:
@@ -936,8 +807,6 @@ def handle_sync():
     except Exception as exc:
         st.error("Synchronisation impossible : les tirs restent sur la tablette.")
         st.exception(exc)
-
-
 def handle_report():
     payload = component_payload("report")
     entries = payload.get("entries") or [] if payload else []
@@ -949,39 +818,72 @@ def handle_report():
     except Exception as exc:
         st.error("Synchronisation impossible avant le bilan. Les tirs restent en attente.")
         st.exception(exc)
-
-
 # ============================================================
 # PARAMÈTRES DE SÉANCE
 # ============================================================
-
 with st.expander(
     "SAISIE TIRS",
     expanded=True,
 ):
-
     settings_col, timer_col = st.columns(
         [1, 2]
     )
-
     with settings_col:
-
         selected_date = st.date_input(
             "Date de séance",
             value=st.session_state.shooting_session_date,
             key="shooting_date_widget",
         )
-
         st.session_state.shooting_session_date = (
             selected_date
         )
 
-        st.markdown("**Contexte de tir**")
+        # Load saved settings when changing date, never overwrite existing comments.
+        if st.session_state.get("shooting_settings_loaded_for") != selected_date.isoformat():
+            existing = get_date_settings(selected_date)
+            st.session_state.shooting_session_type = existing["session_type"]
+            st.session_state.shooting_previous_type = existing["session_type"]
+            st.session_state.shooting_include_standard = existing["include_in_standard_stats"]
+            st.session_state.shooting_session_comment = existing["comment"]
+            st.session_state.shooting_settings_loaded_for = selected_date.isoformat()
 
+        st.markdown("**Type de séance**")
+        selected_type = st.selectbox(
+            "Type de séance",
+            list(SESSION_TYPES),
+            format_func=lambda x: SESSION_TYPES[x],
+            key="shooting_session_type",
+            label_visibility="collapsed",
+        )
+        # Switching from standard to special defaults to excluded.
+        if st.session_state.get("shooting_previous_type") != selected_type:
+            if selected_type != "standard":
+                st.session_state.shooting_include_standard = False
+            elif st.session_state.get("shooting_previous_type") is not None:
+                st.session_state.shooting_include_standard = True
+        st.session_state.shooting_previous_type = selected_type
+        st.checkbox(
+            "Inclure dans les bilans standards",
+            key="shooting_include_standard",
+            help="Décoche pour conserver les tirs sans modifier les statistiques habituelles.",
+        )
+        st.text_area(
+            "Commentaire de séance",
+            key="shooting_session_comment",
+            placeholder="Ex. Lunettes limitant le champ visuel",
+            height=90,
+        )
+        if st.button("Enregistrer les paramètres de séance", key="save_shooting_settings"):
+            try:
+                apply_current_date_settings()
+                st.success("Paramètres enregistrés pour cette date et tous ses joueurs.")
+            except Exception as exc:
+                st.error(f"Impossible d'enregistrer les paramètres : {exc}")
+        st.caption("Pour une séance non standard, enregistre ces paramètres avant de saisir les tirs. La synchronisation les appliquera aussi aux nouveaux joueurs de cette date.")
+        st.markdown("**Contexte de tir**")
         context_keys = list(
             SHOOTING_CONTEXTS.keys()
         )
-
         context = st.selectbox(
             "Contexte",
             context_keys,
@@ -993,19 +895,14 @@ with st.expander(
             label_visibility="collapsed",
             key="shooting_context_widget",
         )
-
         st.session_state.shooting_context = context
-
         st.markdown("**Valeurs verrouillées**")
-
         c1, c2 = st.columns([1.6, 1])
-
         with c1:
             lock_made = st.checkbox(
                 "Verrouiller les réussis",
                 value=st.session_state.shooting_lock_made,
             )
-
         with c2:
             lock_made_value = st.number_input(
                 "Réussis",
@@ -1017,15 +914,12 @@ with st.expander(
                 disabled=not lock_made,
                 label_visibility="collapsed",
             )
-
         c1, c2 = st.columns([1.6, 1])
-
         with c1:
             lock_attempted = st.checkbox(
                 "Verrouiller les tentés",
                 value=st.session_state.shooting_lock_attempted,
             )
-
         with c2:
             lock_attempted_value = st.number_input(
                 "Tentés",
@@ -1037,67 +931,50 @@ with st.expander(
                 disabled=not lock_attempted,
                 label_visibility="collapsed",
             )
-
         st.session_state.shooting_lock_made = (
             lock_made
         )
-
         st.session_state.shooting_lock_attempted = (
             lock_attempted
         )
-
         st.session_state.shooting_lock_made_value = (
             int(lock_made_value)
         )
-
         st.session_state.shooting_lock_attempted_value = (
             int(lock_attempted_value)
         )
-
     with timer_col:
         timer_fragment()
-
-
 # ============================================================
 # COMPOSANT TURBO
 # ============================================================
-
 TURBO_HTML = """
 <div id="shooting-app">
-
     <div class="turbo-toolbar">
         <div>
             <div class="turbo-title">SAISIE TURBO</div>
             <div id="context-label" class="turbo-context"></div>
         </div>
-
         <div class="sync-area">
             <div id="pending" class="pending"></div>
             <button id="sync-btn" class="small-action">Synchroniser</button>
             <button id="report-btn" class="report-action">Bilan séance</button>
         </div>
     </div>
-
     <div id="steps" class="steps"></div>
-
     <div id="flash" class="flash"></div>
-
     <div id="content"></div>
-
 </div>
 """
-
 TURBO_CSS = """
 :host {
     font-family: var(--st-font);
 }
-
 #shooting-app {
     width:100%;
     color:#1A2434;
     padding-top:5px;
 }
-
 .turbo-toolbar {
     display:flex;
     align-items:center;
@@ -1105,20 +982,17 @@ TURBO_CSS = """
     gap:12px;
     margin-bottom:12px;
 }
-
 .turbo-title {
     font-size:.8rem;
     font-weight:900;
     letter-spacing:.06em;
     color:#1A2434;
 }
-
 .turbo-context {
     font-size:.82rem;
     color:#7c8796;
     margin-top:2px;
 }
-
 .sync-area {
     display:flex;
     align-items:center;
@@ -1126,14 +1000,12 @@ TURBO_CSS = """
     gap:7px;
     flex-wrap:wrap;
 }
-
 .pending {
     font-size:.78rem;
     font-weight:750;
     color:#7c8796;
     margin-right:5px;
 }
-
 .small-action,
 .report-action {
     border:0;
@@ -1144,24 +1016,20 @@ TURBO_CSS = """
     cursor:pointer;
     touch-action:manipulation;
 }
-
 .small-action {
     background:#eef1f5;
     color:#1A2434;
 }
-
 .report-action {
     background:#1A2434;
     color:white;
 }
-
 .steps {
     display:grid;
     grid-template-columns:repeat(4,1fr);
     gap:8px;
     margin:8px 0 12px;
 }
-
 .step {
     min-height:44px;
     display:flex;
@@ -1173,20 +1041,17 @@ TURBO_CSS = """
     color:#6f7987;
     font-size:.9rem;
 }
-
 .step.active {
     background:#B8A05A;
     border-color:#B8A05A;
     color:white;
     font-weight:850;
 }
-
 .button-grid {
     display:grid;
     grid-template-columns:repeat(4,1fr);
     gap:12px;
 }
-
 .big-btn {
     width:100%;
     min-height:62px;
@@ -1200,22 +1065,18 @@ TURBO_CSS = """
     touch-action:manipulation;
     -webkit-tap-highlight-color:transparent;
 }
-
 .big-btn:active {
     transform:scale(.985);
     background:#f4f5f7;
 }
-
 .zone-grid {
     display:grid;
     grid-template-columns:repeat(3,1fr);
     gap:12px;
 }
-
 .zone-btn {
     min-height:70px;
 }
-
 .number-display {
     display:flex;
     align-items:center;
@@ -1228,13 +1089,11 @@ TURBO_CSS = """
     font-weight:900;
     margin-bottom:12px;
 }
-
 .numpad {
     display:grid;
     grid-template-columns:repeat(3,1fr);
     gap:8px;
 }
-
 .num-btn {
     min-height:66px;
     border:1px solid #d4dae2;
@@ -1245,20 +1104,17 @@ TURBO_CSS = """
     cursor:pointer;
     touch-action:manipulation;
 }
-
 .num-btn.gold {
     background:#B8A05A;
     color:white;
     border-color:#B8A05A;
 }
-
 .nav-row {
     display:grid;
     grid-template-columns:1fr 1fr;
     gap:10px;
     margin-top:11px;
 }
-
 .nav-btn {
     min-height:55px;
     border-radius:999px;
@@ -1267,19 +1123,16 @@ TURBO_CSS = """
     font-weight:750;
     cursor:pointer;
 }
-
 .nav-btn.primary {
     background:#B8A05A;
     color:white;
     border-color:#B8A05A;
 }
-
 .selection-info {
     color:#707b89;
     font-size:.86rem;
     margin-bottom:10px;
 }
-
 .summary {
     background:#f2f4f7;
     border-radius:13px;
@@ -1288,7 +1141,6 @@ TURBO_CSS = """
     margin-bottom:11px;
     font-weight:750;
 }
-
 .flash {
     min-height:22px;
     font-size:.85rem;
@@ -1296,49 +1148,39 @@ TURBO_CSS = """
     font-weight:750;
     margin-bottom:4px;
 }
-
 .empty {
     padding:30px;
     text-align:center;
     color:#7c8796;
 }
-
 @media (max-width:900px) {
-
     .turbo-toolbar {
         align-items:flex-start;
     }
-
     .button-grid {
         grid-template-columns:repeat(4,1fr);
         gap:8px;
     }
-
     .big-btn {
         min-height:68px;
         font-size:.9rem;
     }
-
     .steps {
         gap:5px;
     }
-
     .step {
         font-size:.8rem;
         min-height:40px;
     }
 }
 """
-
 TURBO_JS = """
 export default function(component) {
-
     const {
         parentElement,
         data,
         setTriggerValue
     } = component;
-
     const content = parentElement.querySelector("#content");
     const stepsBox = parentElement.querySelector("#steps");
     const pendingBox = parentElement.querySelector("#pending");
@@ -1346,14 +1188,12 @@ export default function(component) {
     const contextLabel = parentElement.querySelector("#context-label");
     const syncBtn = parentElement.querySelector("#sync-btn");
     const reportBtn = parentElement.querySelector("#report-btn");
-
     const QUEUE_KEY = "champagne_shooting_queue_v2";
     let queue = [];
     try {
         const parsed = JSON.parse(window.localStorage.getItem(QUEUE_KEY) || "[]");
         queue = Array.isArray(parsed) ? parsed : [];
     } catch { queue = []; }
-
     // Retirer uniquement les IDs explicitement confirmés par Supabase.
     // Ne jamais effacer les nouvelles saisies ajoutées pendant un envoi.
     const confirmed = new Set(data.confirmed_ids || []);
@@ -1361,15 +1201,12 @@ export default function(component) {
         queue = queue.filter(entry => !confirmed.has(String(entry.id)));
         window.localStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
     }
-
     let syncing = false;
-
     let step = 1;
     let player = null;
     let zone = null;
     let made = "0";
     let attempted = "0";
-
     const saveQueue = () => {
         window.localStorage.setItem(
             QUEUE_KEY,
@@ -1377,14 +1214,12 @@ export default function(component) {
         );
         updatePending();
     };
-
     const updatePending = () => {
         pendingBox.textContent =
             queue.length === 0
             ? "Tout est synchronisé"
             : `${queue.length} saisie(s) en attente`;
     };
-
     const showFlash = (text) => {
         flashBox.textContent = text;
         window.clearTimeout(window.__shootFlashTimer);
@@ -1395,19 +1230,15 @@ export default function(component) {
             1400
         );
     };
-
     contextLabel.textContent = data.context_label;
-
     const stepLabels = [
         "1. Joueur",
         "2. Spot",
         "3. Réussis",
         "4. Tentés"
     ];
-
     const renderSteps = () => {
         stepsBox.innerHTML = "";
-
         stepLabels.forEach((label, index) => {
             const el = document.createElement("div");
             el.className =
@@ -1417,22 +1248,17 @@ export default function(component) {
             stepsBox.appendChild(el);
         });
     };
-
     const addInfo = () => {
         const parts = [];
-
         if (player) parts.push(`Joueur : ${player.name}`);
         if (zone) parts.push(`Spot : ${zone.label}`);
-
         if (!parts.length) return "";
-
         return `
             <div class="selection-info">
                 ${parts.join(" · ")}
             </div>
         `;
     };
-
     const createButton = (
         label,
         className,
@@ -1444,20 +1270,15 @@ export default function(component) {
         button.onclick = onClick;
         return button;
     };
-
     const renderPlayers = () => {
-
         content.innerHTML = "";
-
         if (!data.players.length) {
             content.innerHTML =
                 '<div class="empty">Aucun joueur actif.</div>';
             return;
         }
-
         const grid = document.createElement("div");
         grid.className = "button-grid";
-
         data.players.forEach((p) => {
             grid.appendChild(
                 createButton(
@@ -1474,45 +1295,32 @@ export default function(component) {
                 )
             );
         });
-
         content.appendChild(grid);
     };
-
     const renderZones = () => {
-
         content.innerHTML = addInfo();
-
         const grid = document.createElement("div");
         grid.className = "zone-grid";
-
         data.zones.forEach((z) => {
-
             grid.appendChild(
                 createButton(
                     z.label,
                     "big-btn zone-btn",
                     () => {
-
                         zone = z;
-
                         made = data.lock_made
                             ? String(data.lock_made_value)
                             : "0";
-
                         attempted = data.lock_attempted
                             ? String(data.lock_attempted_value)
                             : "0";
-
                         step = data.lock_made ? 4 : 3;
-
                         render();
                     }
                 )
             );
         });
-
         content.appendChild(grid);
-
         const back = createButton(
             "← Retour",
             "nav-btn",
@@ -1523,69 +1331,47 @@ export default function(component) {
                 render();
             }
         );
-
         const nav = document.createElement("div");
         nav.className = "nav-row";
         nav.style.gridTemplateColumns = "1fr";
         nav.appendChild(back);
-
         content.appendChild(nav);
     };
-
     const appendDigit = (field, digit) => {
-
         let value = field === "made"
             ? made
             : attempted;
-
         if (value === "0") value = "";
-
         value += String(digit);
-
         if (field === "made") made = value;
         else attempted = value;
-
         render();
     };
-
     const backspace = (field) => {
-
         let value = field === "made"
             ? made
             : attempted;
-
         value = value.slice(0, -1) || "0";
-
         if (field === "made") made = value;
         else attempted = value;
-
         render();
     };
-
     const clearValue = (field) => {
-
         if (field === "made") made = "0";
         else attempted = "0";
-
         render();
     };
-
     const renderNumpad = (field) => {
-
         content.innerHTML = addInfo();
-
         const display = document.createElement("div");
         display.className = "number-display";
         display.textContent =
             field === "made"
             ? made
             : attempted;
-
         content.appendChild(display);
-
         const pad = document.createElement("div");
         pad.className = "numpad";
-
         [1,2,3,4,5,6,7,8,9].forEach((digit) => {
             pad.appendChild(
                 createButton(
@@ -1595,7 +1381,6 @@ export default function(component) {
                 )
             );
         });
-
         pad.appendChild(
             createButton(
                 "C",
@@ -1603,7 +1388,6 @@ export default function(component) {
                 () => clearValue(field)
             )
         );
-
         pad.appendChild(
             createButton(
                 "0",
@@ -1611,7 +1395,6 @@ export default function(component) {
                 () => appendDigit(field, 0)
             )
         );
-
         pad.appendChild(
             createButton(
                 "⌫",
@@ -1619,14 +1402,10 @@ export default function(component) {
                 () => backspace(field)
             )
         );
-
         content.appendChild(pad);
-
         const nav = document.createElement("div");
         nav.className = "nav-row";
-
         if (field === "made") {
-
             nav.appendChild(
                 createButton(
                     "← Retour",
@@ -1637,27 +1416,22 @@ export default function(component) {
                     }
                 )
             );
-
             nav.appendChild(
                 createButton(
                     "Suivant →",
                     "nav-btn primary",
                     () => {
-
                         if (data.lock_attempted) {
                             attempted = String(
                                 data.lock_attempted_value
                             );
                         }
-
                         step = 4;
                         render();
                     }
                 )
             );
-
         } else {
-
             nav.appendChild(
                 createButton(
                     "← Retour",
@@ -1669,80 +1443,57 @@ export default function(component) {
                 )
             );
         }
-
         content.appendChild(nav);
     };
-
     const submitEntry = () => {
-
         const m = Number(made || 0);
         const a = Number(attempted || 0);
-
         if (m > a) {
             showFlash(
                 "⚠️ Les réussis ne peuvent pas dépasser les tentés."
             );
             return;
         }
-
         const entry = {
             id:
                 (window.crypto?.randomUUID?.())
                 || `${Date.now()}-${Math.random()}`,
-
             date: data.date,
             context: data.context,
-
             player_id: player.id,
             player_name: player.name,
-
             zone: zone.code,
             zone_label: zone.label,
-
             made: m,
             attempted: a,
-
             created_at: Date.now()
         };
-
         queue.push(entry);
         saveQueue();
-
         showFlash(
             `✓ ${player.name} · ${zone.label} · ${m}/${a} enregistré`
         );
-
         // IMPORTANT :
         // aucune communication Streamlit ici.
         // Retour instantané à la sélection joueur.
-
         step = 1;
         player = null;
         zone = null;
         made = "0";
         attempted = "0";
-
         render();
     };
-
     const renderAttempted = () => {
-
         content.innerHTML = addInfo();
-
         const m = Number(made || 0);
         const a = Number(attempted || 0);
-
         const display = document.createElement("div");
         display.className = "number-display";
         display.textContent = attempted;
-
         content.appendChild(display);
-
         if (!data.lock_attempted) {
-
             const pad = document.createElement("div");
             pad.className = "numpad";
-
             [1,2,3,4,5,6,7,8,9].forEach((digit) => {
                 pad.appendChild(
                     createButton(
@@ -1752,7 +1503,6 @@ export default function(component) {
                     )
                 );
             });
-
             pad.appendChild(
                 createButton(
                     "C",
@@ -1760,7 +1510,6 @@ export default function(component) {
                     () => clearValue("attempted")
                 )
             );
-
             pad.appendChild(
                 createButton(
                     "0",
@@ -1768,7 +1517,6 @@ export default function(component) {
                     () => appendDigit("attempted", 0)
                 )
             );
-
             pad.appendChild(
                 createButton(
                     "⌫",
@@ -1776,20 +1524,15 @@ export default function(component) {
                     () => backspace("attempted")
                 )
             );
-
             content.appendChild(pad);
         }
-
         const summary = document.createElement("div");
         summary.className = "summary";
         summary.textContent =
             `${player.name} · ${zone.label} → ${m}/${a}`;
-
         content.appendChild(summary);
-
         const nav = document.createElement("div");
         nav.className = "nav-row";
-
         nav.appendChild(
             createButton(
                 "← Retour",
@@ -1800,7 +1543,6 @@ export default function(component) {
                 }
             )
         );
-
         nav.appendChild(
             createButton(
                 "Envoyer ✓",
@@ -1808,21 +1550,16 @@ export default function(component) {
                 submitEntry
             )
         );
-
         content.appendChild(nav);
     };
-
     const render = () => {
-
         renderSteps();
         updatePending();
-
         if (step === 1) renderPlayers();
         else if (step === 2) renderZones();
         else if (step === 3) renderNumpad("made");
         else if (step === 4) renderAttempted();
     };
-
     const sendBatch = (trigger) => {
         if (syncing) return;
         if (!queue.length && trigger === "sync") {
@@ -1840,25 +1577,18 @@ export default function(component) {
         // Si la réponse n'arrive pas, le rechargement de la page permet
         // de réessayer sans risque : les IDs sont protégés en base.
     };
-
     syncBtn.onclick = () => sendBatch("sync");
     reportBtn.onclick = () => sendBatch("report");
-
     render();
 }
 """
-
-
 shooting_component = st.components.v2.component(
     name="champagne_shooting_turbo",
     html=TURBO_HTML,
     css=TURBO_CSS,
     js=TURBO_JS,
 )
-
-
 players = get_players()
-
 component_players = [
     {
         "id": player["id"],
@@ -1866,7 +1596,6 @@ component_players = [
     }
     for player in players
 ]
-
 component_zones = [
     {
         "code": code,
@@ -1874,65 +1603,49 @@ component_zones = [
     }
     for code, label in ZONES
 ]
-
-
 shooting_component(
     data={
         "players": component_players,
         "zones": component_zones,
-
         "date":
             st.session_state
             .shooting_session_date
             .isoformat(),
-
         "context":
             st.session_state
             .shooting_context,
-
         "context_label":
             SHOOTING_CONTEXTS[
                 st.session_state.shooting_context
             ],
-
         "lock_made":
             st.session_state
             .shooting_lock_made,
-
         "lock_made_value":
             int(
                 st.session_state
                 .shooting_lock_made_value
             ),
-
         "lock_attempted":
             st.session_state
             .shooting_lock_attempted,
-
         "lock_attempted_value":
             int(
                 st.session_state
                 .shooting_lock_attempted_value
             ),
-
         "ack": st.session_state.shooting_sync_ack,
         "confirmed_ids": st.session_state.shooting_confirmed_ids,
     },
-
     key="shooting_turbo_component",
-
     on_sync_change=handle_sync,
     on_report_change=handle_report,
-
     width="stretch",
     height="content",
 )
-
-
 # ============================================================
 # OUVERTURE DU BILAN APRÈS SYNCHRONISATION
 # ============================================================
-
 if st.session_state.pop(
     "shooting_open_report",
     False,
